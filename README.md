@@ -16,6 +16,23 @@
 - `jdy-inventory-meter-injector-template.user.js`：库存查询表注入米数（可配置模板）。
 - `jdy-dev-dict-v18.original.user.js`：开发字典助手 V18（original 存档）。
 - `jdy-dev-dict-v18-template.user.js`：开发字典助手 V18（可配置模板）。
+- `gangqinpu-unlocker-v7.original.user.js`：虫虫钢琴解锁脚本 V7（original 存档）。
+- `gangqinpu-unlocker-template.user.js`：虫虫钢琴解锁脚本（可配置模板）。
+- `tm-core-runtime.user.js`：Core 运行时（插件注册、fetch/xhr拦截、公共工具）。
+- `jdy-field-check-plugin.user.js`：基于 Core 的 JDY 字段校验插件示例。
+
+
+## Core + Plugin 架构（新）
+
+已新增可扩展内核：
+
+- `tm-core-runtime.user.js` 提供：
+  - `registerPlugin(name, plugin)`
+  - `hookFetchJson(handler)` / `hookXhrJson(handler)`
+  - `deepWalk / safeJsonParse / normalizeText / toNumber / showToast`
+- `jdy-field-check-plugin.user.js` 为示例插件（依赖 Core）。
+
+> 使用顺序：先启用 `tm-core-runtime.user.js`，再启用插件脚本。
 
 ## 如何复用模板（建议）
 
@@ -65,6 +82,16 @@
 - `backendNamePattern` / `rootNamePattern`（分类规则）
 - `ui.title` / `ui.position`
 
+
+### F) 虫虫钢琴解锁模板（`gangqinpu-unlocker-template.user.js`）
+
+主要改 `CONFIG`：
+
+- `showJumpOnlyWhenUrlIncludes` / `playerUrlRegex`
+- `modeParam` / `modeLabels`
+- `hiddenSelectorsOnScreen` / `hiddenSelectorsOnPrint`
+- `removeBeforePrintSelectors`
+
 > 建议：每次给新脚本时都“先存档 `*.original.user.js`”，再产出一个 `*-template.user.js` 可配置版本。
 
 ## 安装方式
@@ -78,3 +105,5 @@
 - `window.__JDY_CHECK_TEMPLATE__`
 - `window.__JDY_AUTO_WORKFLOW__`
 - `window.KD_DEV_V18`
+- `window.__GANGQINPU_UNLOCKER__`
+- `window.__TM_CORE_RUNTIME__`
