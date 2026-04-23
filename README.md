@@ -8,7 +8,6 @@
 ## 当前文件
 
 - `jdy-check-template.user.js`：通用字段一致性校验模板（拦保存/提交/审核等关键动作）。
-- `12.js`：当前联调版字段一致性脚本（与 `jdy-check-template.user.js` 同步）。
 - `jdy-auto-workflow-template.user.js`：通用自动流程模板（切页签、修正表格、删空行、保存确认）。
 - `jdy-auto-edit-11111.original.user.js`：自动修改表格脚本（original 存档）。
 - `jdy-order-stock-injector.original.user.js`：订单汇总注入即时库存脚本（original 存档）。
@@ -21,9 +20,6 @@
 - `gangqinpu-unlocker-template.user.js`：虫虫钢琴解锁脚本（可配置模板）。
 - `tm-core-runtime.user.js`：Core 运行时（插件注册、fetch/xhr拦截、公共工具）。
 - `jdy-field-check-plugin.user.js`：基于 Core 的 JDY 字段校验插件示例。
-- `jdy-12-core-plugin-template.user.js`：12.js 场景 Core 插件骨架（按单据类型/编码/类别条件比对）。
-- `jdy-unit-check-v1.2.0.original.user.js`：双单位换算校验 1.2.0（original 存档）。
-- `jdy-unit-check-v1.2.0-template.user.js`：双单位换算校验 1.2.0（可配置模板）。
 
 
 ## Core + Plugin 架构（新）
@@ -37,8 +33,6 @@
 - `jdy-field-check-plugin.user.js` 为示例插件（依赖 Core）。
 
 > 使用顺序：先启用 `tm-core-runtime.user.js`，再启用插件脚本。
-
-- 推荐：12.js 场景可直接使用 `jdy-12-core-plugin-template.user.js`，重点修改其 `CONFIG.fields` 与 `CONFIG.compareRules`。
 
 ## 如何复用模板（建议）
 
@@ -98,21 +92,7 @@
 - `hiddenSelectorsOnScreen` / `hiddenSelectorsOnPrint`
 - `removeBeforePrintSelectors`
 
-
-### G) 双单位换算 1.2 模板（`jdy-unit-check-v1.2.0-template.user.js`）
-
-主要改 `CONFIG`：
-
-- `allowedBtnKeys` / `allowedIds` / `allowedOpk`
-- `maxPopupItems`
-- 规则逻辑：`spec > formula`（强拦截）、`spec < formula`（提示确认）
-
 > 建议：每次给新脚本时都“先存档 `*.original.user.js`”，再产出一个 `*-template.user.js` 可配置版本。
-
-
-## 使用文档
-
-- 详细使用说明见：`USAGE.md`（包含快速开始、Core+插件模式、12.js 场景配置、FAQ）。
 
 ## 安装方式
 
@@ -127,4 +107,3 @@
 - `window.KD_DEV_V18`
 - `window.__GANGQINPU_UNLOCKER__`
 - `window.__TM_CORE_RUNTIME__`
-- `window.__JDY_UNIT_CHECK__`
