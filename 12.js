@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         金蝶精斗云-规则面板终版
+// @name         金蝶精斗云-规则面板重构版（修复报错版）
 // @namespace    http://tampermonkey.net/
-// @version      4.8.0
-// @description  基于当前HAR重构：当前单据识别、字段抓取、按钮抓取、动态输入增量合并、保存前重查
+// @version      5.0.1
+// @description  当前单据识别 + 表头表体分层 + 动态输入增量合并 + 精度比较 + 单据/商品过滤
 // @author       ChatGPT
 // @match        *://tf.jdy.com/*
 // @run-at       document-start
@@ -12,11 +12,7 @@
 (function () {
   'use strict';
 
-  // =========================================================
-  // 一、常量
-  // =========================================================
-  const STORAGE_KEY = '__JDY_RULE_PANEL_CONFIG_V480__';
-
+  const STORAGE_KEY = '__JDY_RULE_PANEL_CONFIG_V501__';
   const STYLE_ID = '__jdy_rule_panel_style__';
   const FAB_ID = '__jdy_rule_panel_fab__';
   const PANEL_WRAP_ID = '__jdy_rule_panel_wrap__';
@@ -25,147 +21,7 @@
   const MODAL_ID = '__jdy_rule_modal__';
 
   // =========================================================
-  // 二、默认配置
-  // =========================================================
-  const DEFAULT_CONFIG = {
-    debug: false,
-
-    entityKey: 'material_entity',
-
-    preferredFields: [
-      'seq',
-      'material_name',
-      'materialid',
-      'material_model',
-      'conversionrate',
-      'qty',
-      'auxqty',
-      'baseunit',
-      'baseqty',
-      'billdate'
-    ],
-
-    customFields: [],
-
-    buttonsCatalog: [],
-
-    rules: [
-      {
-        id: uid(),
-        name: '规格大于换算 => 拦截',
-        enabled: true,
-        action: 'block',
-        matchMode: 'all',
-        scopeType: 'all',
-        scopeValue: '',
-        conditions: [
-          {
-            id: uid(),
-            leftField: 'material_model',
-            leftTransform: 'firstNumber',
-            operator: 'gt',
-            rightType: 'field',
-            rightField: 'conversionrate',
-            rightTransform: 'formulaRightNumber',
-            rightValue: ''
-          }
-        ]
-      },
-      {
-        id: uid(),
-        name: '规格小于换算 => 提示',
-        enabled: true,
-        action: 'warn',
-        matchMode: 'all',
-        scopeType: 'all',
-        scopeValue: '',
-        conditions: [
-          {
-            id: uid(),
-            leftField: 'material_model',
-            leftTransform: 'firstNumber',
-            operator: 'lt',
-            rightType: 'field',
-            rightField: 'conversionrate',
-            rightTransform: 'formulaRightNumber',
-            rightValue: ''
-          }
-        ]
-      }
-    ],
-
-    ui: {
-      maxPopupItems: 50,
-      bannerHideMs: 1500
-    },
-
-    messages: {
-      bannerTitle: '检测到规则命中',
-      blockTitle: '当前单据不能继续操作',
-      blockDesc: '检测到命中“拦截”规则的明细，请先修改后再继续操作。',
-      warnTitle: '请确认是否继续操作',
-      warnDesc: '检测到命中“提示”规则的明细，系统允许继续，但建议先核对。',
-      blockButtonText: '我知道了',
-      warnBackButtonText: '返回修改',
-      warnContinueButtonText: '继续操作'
-    }
-  };
-
-  // =========================================================
-  // 三、状态
-  // =========================================================
-  const state = {
-    config: loadConfig(),
-
-    latestPayload: null,
-    latestEntity: null,
-
-    latestFieldCatalog: {},
-    latestHeadFieldCatalog: {},
-    latestHeadValues: {},
-    latestButtonCatalog: [],
-    latestButtonHintKeys: [],
-    latestPageScopes: [],
-
-    lastSeenFormMeta: {
-      formId: '',
-      formName: '',
-      appId: '',
-      pageId: '',
-      seenAt: 0
-    },
-
-    currentPageMeta: {
-      formId: '',
-      formName: '',
-      appId: '',
-      pageId: '',
-      source: ''
-    },
-
-    latestBodyEditDeltas: {},
-    latestHeadEditDeltas: {},
-    activeBodyRowZeroIndex: null,
-
-    liveRows: [],
-
-    blockItems: [],
-    warnItems: [],
-    lastDataHash: '',
-
-    bannerDismissedAt: 0,
-    lastInterceptAt: 0,
-
-    bypassRoot: null,
-    bypassUntil: 0,
-    bypassRemaining: 0,
-
-    panelOpen: false,
-    panelDirty: false
-  };
-
-  // =========================================================
-  // 四、基础工具
+  // 一、基础工具
   // =========================================================
   function uid() {
     return 'id_' + Math.random().toString(36).slice(2, 10);
@@ -200,12 +56,6 @@
     if (typeof v === 'number') return v;
     const n = Number(v);
     return Number.isNaN(n) ? NaN : n;
-  }
-
-  function log() {
-    if (state.config.debug) {
-      console.log('[JDY-规则面板]', ...arguments);
-    }
   }
 
   function debounce(fn, wait) {
@@ -305,7 +155,6 @@
   function parseFormIdFromText(text) {
     const t = normalizeText(text);
     if (!t) return '';
-
     const regs = [
       /(sal_[a-z0-9_]+)/i,
       /(pur_[a-z0-9_]+)/i,
@@ -313,24 +162,16 @@
       /(inv_[a-z0-9_]+)/i,
       /(batch_fill_entry_stock)/i
     ];
-
     for (const reg of regs) {
       const m = t.match(reg);
       if (m && m[1]) return m[1];
     }
-
     return '';
   }
 
   function parseAnalyticsFormMeta(body) {
     const text = bodyToString(body);
-    const result = {
-      formId: '',
-      formName: '',
-      appId: '',
-      pageId: ''
-    };
-
+    const result = { formId: '', formName: '', appId: '', pageId: '' };
     if (!text) return result;
 
     let m = text.match(/"ptl":"([^"|]+)\|([^"]+)"/);
@@ -348,9 +189,7 @@
     m = text.match(/"pageId":"([^"]+)"/);
     if (m && m[1]) result.pageId = m[1];
 
-    if (!result.formName && result.formId) {
-      result.formName = formIdToName(result.formId);
-    }
+    if (!result.formName && result.formId) result.formName = formIdToName(result.formId);
 
     return result;
   }
@@ -366,24 +205,19 @@
   }
 
   function parseActionContextFromRequest(url, body) {
-    const result = {
-      activeBodyRowZeroIndex: null
-    };
+    const result = { activeBodyRowZeroIndex: null };
 
     try {
       const q = parseQueryString(url);
       const ac = q.ac || '';
       const params = tryParseParamsJsonFromBody(body);
-
       if (!params || !Array.isArray(params)) return result;
 
       params.forEach(item => {
         if (!item || typeof item !== 'object') return;
 
-        if (ac === 'entryRowClick') {
-          if (Array.isArray(item.args) && typeof item.args[0] === 'number') {
-            result.activeBodyRowZeroIndex = item.args[0];
-          }
+        if (ac === 'entryRowClick' && Array.isArray(item.args) && typeof item.args[0] === 'number') {
+          result.activeBodyRowZeroIndex = item.args[0];
         }
 
         if (Array.isArray(item.postData)) {
@@ -394,9 +228,7 @@
           });
         }
       });
-    } catch (e) {
-      log('parseActionContextFromRequest fail', e);
-    }
+    } catch (e) {}
 
     return result;
   }
@@ -404,59 +236,177 @@
   function parseFormMetaFromRequest(url, body) {
     const q = parseQueryString(url);
     const b = parseFormBody(body);
-
-    const result = {
-      formId: '',
-      formName: '',
-      appId: '',
-      pageId: ''
-    };
+    const result = { formId: '', formName: '', appId: '', pageId: '' };
 
     if (q.f) result.formId = q.f;
     if (q.appId) result.appId = q.appId;
     if (q.pageId) result.pageId = q.pageId;
-
     if (!result.appId && b.appId) result.appId = b.appId;
     if (!result.pageId && b.pageId) result.pageId = b.pageId;
-
-    if (!result.formName && result.formId) {
-      result.formName = formIdToName(result.formId);
-    }
+    if (!result.formName && result.formId) result.formName = formIdToName(result.formId);
 
     if (!result.formId || !result.formName) {
-      const fromTrack = parseAnalyticsFormMeta(body);
-      if (!result.appId && fromTrack.appId) result.appId = fromTrack.appId;
-      if (!result.formId && fromTrack.formId) result.formId = fromTrack.formId;
-      if (!result.formName && fromTrack.formName) result.formName = fromTrack.formName;
-      if (!result.pageId && fromTrack.pageId) result.pageId = fromTrack.pageId;
+      const tr = parseAnalyticsFormMeta(body);
+      if (!result.appId && tr.appId) result.appId = tr.appId;
+      if (!result.formId && tr.formId) result.formId = tr.formId;
+      if (!result.formName && tr.formName) result.formName = tr.formName;
+      if (!result.pageId && tr.pageId) result.pageId = tr.pageId;
     }
 
     return result;
   }
 
-  function mergeLatestSeenFormMeta(meta) {
-    if (!meta) return;
-
-    const next = { ...state.lastSeenFormMeta };
-
-    if (meta.formId) next.formId = meta.formId;
-    if (meta.formName) next.formName = meta.formName;
-    if (meta.appId) next.appId = meta.appId;
-    if (meta.pageId) next.pageId = meta.pageId;
-
-    if (next.formId && !next.formName) {
-      next.formName = formIdToName(next.formId);
+  // =========================================================
+  // 二、配置
+  // =========================================================
+  const DEFAULT_CONFIG = {
+    debug: false,
+    entityKey: 'material_entity',
+    preferredFields: ['seq', 'material_name', 'materialid', 'material_model', 'conversionrate', 'qty', 'auxqty', 'baseunit', 'baseqty', 'material_category'],
+    customFields: [],
+    buttonsCatalog: [],
+    rules: [
+      {
+        id: uid(),
+        name: '规格大于换算 => 拦截',
+        enabled: true,
+        action: 'block',
+        matchMode: 'all',
+        scopeType: 'all',
+        scopeValue: '',
+        filters: {
+          formIds: '',
+          materialIds: '',
+          materialCategories: ''
+        },
+        conditions: [
+          {
+            id: uid(),
+            leftField: 'material_model',
+            leftTransform: 'firstNumber',
+            operator: 'gt',
+            rightType: 'field',
+            rightField: 'conversionrate',
+            rightTransform: 'formulaRightNumber',
+            rightValue: '',
+            compareMode: 'numberExact',
+            tolerance: '0.001'
+          }
+        ]
+      },
+      {
+        id: uid(),
+        name: '规格小于换算 => 提示',
+        enabled: true,
+        action: 'warn',
+        matchMode: 'all',
+        scopeType: 'all',
+        scopeValue: '',
+        filters: {
+          formIds: '',
+          materialIds: '',
+          materialCategories: ''
+        },
+        conditions: [
+          {
+            id: uid(),
+            leftField: 'material_model',
+            leftTransform: 'firstNumber',
+            operator: 'lt',
+            rightType: 'field',
+            rightField: 'conversionrate',
+            rightTransform: 'formulaRightNumber',
+            rightValue: '',
+            compareMode: 'numberExact',
+            tolerance: '0.001'
+          }
+        ]
+      }
+    ],
+    ui: {
+      maxPopupItems: 50,
+      bannerHideMs: 1500
+    },
+    messages: {
+      bannerTitle: '检测到规则命中',
+      blockTitle: '当前单据不能继续操作',
+      blockDesc: '检测到命中“拦截”规则的明细，请先修改后再继续操作。',
+      warnTitle: '请确认是否继续操作',
+      warnDesc: '检测到命中“提示”规则的明细，系统允许继续，但建议先核对。',
+      blockButtonText: '我知道了',
+      warnBackButtonText: '返回修改',
+      warnContinueButtonText: '继续操作'
     }
+  };
 
-    next.seenAt = Date.now();
-    state.lastSeenFormMeta = next;
+  function mergeConfig(base, ext) {
+    const result = Array.isArray(base) ? [...base] : { ...base };
+    for (const k in ext) {
+      const bv = result[k];
+      const ev = ext[k];
+      if (Array.isArray(ev)) result[k] = ev;
+      else if (ev && typeof ev === 'object' && bv && typeof bv === 'object' && !Array.isArray(bv)) result[k] = mergeConfig(bv, ev);
+      else result[k] = ev;
+    }
+    return result;
   }
 
-  function mergeLatestActionContext(ctx) {
-    if (!ctx) return;
-    if (typeof ctx.activeBodyRowZeroIndex === 'number' && ctx.activeBodyRowZeroIndex >= 0) {
-      state.activeBodyRowZeroIndex = ctx.activeBodyRowZeroIndex;
+  function loadConfig() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) return clone(DEFAULT_CONFIG);
+      return mergeConfig(clone(DEFAULT_CONFIG), JSON.parse(saved));
+    } catch (e) {
+      return clone(DEFAULT_CONFIG);
     }
+  }
+
+  function saveConfig() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state.config));
+  }
+
+  // =========================================================
+  // 三、状态
+  // =========================================================
+  const state = {
+    config: loadConfig(),
+    latestPayload: null,
+    latestEntity: null,
+    latestFieldCatalog: {},
+    latestHeadFieldCatalog: {},
+    latestHeadValues: {},
+    latestButtonCatalog: [],
+    latestButtonHintKeys: [],
+    latestPageScopes: [],
+    lastSeenFormMeta: { formId: '', formName: '', appId: '', pageId: '', seenAt: 0 },
+    currentPageMeta: { formId: '', formName: '', appId: '', pageId: '', source: '' },
+    latestBodyEditDeltas: {},
+    latestHeadEditDeltas: {},
+    activeBodyRowZeroIndex: null,
+    liveRows: [],
+    blockItems: [],
+    warnItems: [],
+    lastDataHash: '',
+    bannerDismissedAt: 0,
+    lastInterceptAt: 0,
+    bypassRoot: null,
+    bypassUntil: 0,
+    bypassRemaining: 0,
+    panelOpen: false,
+    panelDirty: false
+  };
+
+  // =========================================================
+  // 四、UI 基础函数（这次提前定义，避免报错）
+  // =========================================================
+  function removeBanner() {
+    const banner = document.getElementById(BANNER_ID);
+    if (banner) banner.remove();
+  }
+
+  function closeModal() {
+    const modal = document.getElementById(MODAL_ID);
+    if (modal) modal.remove();
   }
 
   function clearDocumentCaches() {
@@ -471,22 +421,35 @@
     state.blockItems = [];
     state.warnItems = [];
     state.lastDataHash = '';
-    removeBanner();
+    try { removeBanner(); } catch (e) {}
+    try { closeModal(); } catch (e) {}
   }
 
   // =========================================================
   // 五、当前单据识别
   // =========================================================
-  function getDomCurrentFormMeta() {
-    const result = {
-      formId: '',
-      formName: '',
-      appId: '',
-      pageId: '',
-      source: ''
-    };
+  function mergeLatestSeenFormMeta(meta) {
+    if (!meta) return;
+    const next = { ...state.lastSeenFormMeta };
+    if (meta.formId) next.formId = meta.formId;
+    if (meta.formName) next.formName = meta.formName;
+    if (meta.appId) next.appId = meta.appId;
+    if (meta.pageId) next.pageId = meta.pageId;
+    if (next.formId && !next.formName) next.formName = formIdToName(next.formId);
+    next.seenAt = Date.now();
+    state.lastSeenFormMeta = next;
+  }
 
-    // 1）优先看 common_tool / common_content 的 data-page-id
+  function mergeLatestActionContext(ctx) {
+    if (!ctx) return;
+    if (typeof ctx.activeBodyRowZeroIndex === 'number' && ctx.activeBodyRowZeroIndex >= 0) {
+      state.activeBodyRowZeroIndex = ctx.activeBodyRowZeroIndex;
+    }
+  }
+
+  function getDomCurrentFormMeta() {
+    const result = { formId: '', formName: '', appId: '', pageId: '', source: '' };
+
     const domAnchors = Array.from(document.querySelectorAll(
       '#common_tool[data-page-id], #common_content[data-page-id], [data-page-id*="_common_tool"], [data-page-id*="_common_content"]'
     )).filter(isElementVisible);
@@ -503,7 +466,6 @@
       }
     }
 
-    // 2）再看标题/页签文本
     const textNodes = Array.from(document.querySelectorAll('[title], ._8CrArYyY, .ant-tabs-tab-active, .el-tabs__item.is-active'))
       .filter(isElementVisible)
       .map(el => normalizeText(el.getAttribute('title') || el.textContent))
@@ -544,13 +506,7 @@
       };
     }
 
-    return {
-      formId: '',
-      formName: '',
-      appId: '',
-      pageId: '',
-      source: ''
-    };
+    return { formId: '', formName: '', appId: '', pageId: '', source: '' };
   }
 
   function syncCurrentPageMeta() {
@@ -575,7 +531,6 @@
 
   function getPageContext() {
     syncCurrentPageMeta();
-
     const pageIds = Array.from(document.querySelectorAll('[data-page-id]'))
       .filter(isElementVisible)
       .map(el => normalizeText(el.getAttribute('data-page-id')))
@@ -591,7 +546,7 @@
   }
 
   // =========================================================
-  // 六、规则 / 转换
+  // 六、规则与比较
   // =========================================================
   const TRANSFORMS = [
     { value: 'raw', label: '原文本' },
@@ -600,6 +555,7 @@
     { value: 'upper', label: '大写文本' },
     { value: 'firstNumber', label: '提取第一个数字' },
     { value: 'formulaRightNumber', label: '提取换算右值' },
+    { value: 'toNumber', label: '转数字' },
     { value: 'length', label: '文本长度' }
   ];
 
@@ -613,6 +569,17 @@
     { value: 'contains', label: '包含' },
     { value: 'notContains', label: '不包含' },
     { value: 'regex', label: '正则匹配' }
+  ];
+
+  const COMPARE_MODES = [
+    { value: 'auto', label: '自动' },
+    { value: 'textExact', label: '文本精确' },
+    { value: 'textTrim', label: '文本去空格' },
+    { value: 'numberExact', label: '数字精确' },
+    { value: 'numberRound2', label: '数字保留2位' },
+    { value: 'numberRound3', label: '数字保留3位' },
+    { value: 'numberTolerance', label: '数字允许误差' },
+    { value: 'dateYmd', label: '日期按天比较' }
   ];
 
   const ACTION_OPTIONS = [
@@ -655,9 +622,33 @@
     return null;
   }
 
+  function pad2(n) {
+    return String(n).padStart(2, '0');
+  }
+
+  function toDateObj(value) {
+    const s = normalizeText(value);
+    if (!s) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      const d = new Date(s + 'T00:00:00');
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const normalized = s
+      .replace(/[年/.]/g, '-')
+      .replace(/[月]/g, '-')
+      .replace(/[日]/g, '')
+      .trim();
+    const d = new Date(normalized);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  function dateToYmd(d) {
+    if (!(d instanceof Date) || Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+
   function applyTransform(value, transformName) {
     const raw = normalizeText(value);
-
     switch (transformName) {
       case 'raw': return value == null ? '' : String(value);
       case 'trim': return raw;
@@ -665,19 +656,49 @@
       case 'upper': return raw.toUpperCase();
       case 'firstNumber': return extractFirstNumber(raw);
       case 'formulaRightNumber': return extractFormulaRightNumber(raw);
+      case 'toNumber': return num(raw);
       case 'length': return raw.length;
       default: return raw;
     }
   }
 
-  function compareValues(left, operator, right) {
+  function roundFixed(v, digits) {
+    const n = num(v);
+    if (Number.isNaN(n)) return NaN;
+    return Number(n.toFixed(digits));
+  }
+
+  function eqByCompareMode(left, right, compareMode, toleranceText) {
+    const mode = compareMode || 'auto';
+
+    if (mode === 'textExact') return String(left) === String(right);
+    if (mode === 'textTrim') return normalizeText(left) === normalizeText(right);
+    if (mode === 'dateYmd') return dateToYmd(toDateObj(left)) === dateToYmd(toDateObj(right));
+    if (mode === 'numberExact') return num(left) === num(right);
+    if (mode === 'numberRound2') return roundFixed(left, 2) === roundFixed(right, 2);
+    if (mode === 'numberRound3') return roundFixed(left, 3) === roundFixed(right, 3);
+    if (mode === 'numberTolerance') {
+      const ln = num(left);
+      const rn = num(right);
+      const tol = Number(toleranceText || '0.001');
+      if (Number.isNaN(ln) || Number.isNaN(rn) || Number.isNaN(tol)) return false;
+      return Math.abs(ln - rn) <= tol;
+    }
+
+    const ln = num(left);
+    const rn = num(right);
+    if (!Number.isNaN(ln) && !Number.isNaN(rn)) return ln === rn;
+    return normalizeText(left) === normalizeText(right);
+  }
+
+  function compareValues(left, operator, right, compareMode, toleranceText) {
     switch (operator) {
       case 'gt': return num(left) > num(right);
       case 'lt': return num(left) < num(right);
       case 'ge': return num(left) >= num(right);
       case 'le': return num(left) <= num(right);
-      case 'eq': return String(left) === String(right);
-      case 'ne': return String(left) !== String(right);
+      case 'eq': return eqByCompareMode(left, right, compareMode, toleranceText);
+      case 'ne': return !eqByCompareMode(left, right, compareMode, toleranceText);
       case 'contains': return String(left).includes(String(right));
       case 'notContains': return !String(left).includes(String(right));
       case 'regex':
@@ -697,30 +718,46 @@
     return 1;
   }
 
+  function tokenizeList(text) {
+    return String(text || '')
+      .split(/[\n,，;；]+/)
+      .map(s => normalizeText(s))
+      .filter(Boolean);
+  }
+
+  function wildcardMatch(value, token, containsMode) {
+    const v = normalizeText(value);
+    const t = normalizeText(token);
+    if (!t) return true;
+    if (t.includes('*')) {
+      const reg = new RegExp('^' + t.split('*').map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 'i');
+      return reg.test(v);
+    }
+    return containsMode ? v.includes(t) : v === t;
+  }
+
+  function matchTokenList(value, listText, containsMode) {
+    const tokens = tokenizeList(listText);
+    if (!tokens.length) return true;
+    return tokens.some(token => wildcardMatch(value, token, containsMode));
+  }
+
   function ruleMatchesScope(rule) {
     const ctx = getPageContext();
     const value = normalizeText(rule.scopeValue);
-
     switch (rule.scopeType) {
-      case 'all':
-        return true;
-      case 'formIdEq':
-        return !value || ctx.formId === value;
-      case 'formNameContains':
-        return !value || ctx.formName.includes(value);
-      case 'pageIdIncludes':
-        return !value || ctx.pageIds.some(id => id.includes(value));
-      case 'urlIncludes':
-        return !value || ctx.url.includes(value);
-      case 'pageTitleIncludes':
-        return !value || ctx.title.includes(value);
-      default:
-        return true;
+      case 'all': return true;
+      case 'formIdEq': return !value || ctx.formId === value;
+      case 'formNameContains': return !value || ctx.formName.includes(value);
+      case 'pageIdIncludes': return !value || ctx.pageIds.some(id => id.includes(value));
+      case 'urlIncludes': return !value || ctx.url.includes(value);
+      case 'pageTitleIncludes': return !value || ctx.title.includes(value);
+      default: return true;
     }
   }
 
   // =========================================================
-  // 七、字段目录 / 按钮目录（按 HAR 学到的结构）
+  // 七、字段目录 / payload
   // =========================================================
   function findEntity(root) {
     let found = null;
@@ -728,13 +765,7 @@
     deepWalk(root, (obj) => {
       if (found) return;
 
-      if (
-        obj &&
-        obj.k === state.config.entityKey &&
-        obj.data &&
-        obj.data.dataindex &&
-        Array.isArray(obj.data.rows)
-      ) {
+      if (obj && obj.k === state.config.entityKey && obj.data && obj.data.dataindex && Array.isArray(obj.data.rows)) {
         found = obj.data;
         return;
       }
@@ -759,9 +790,7 @@
   function hasCreateGridColumns(root) {
     let yes = false;
     deepWalk(root, (obj) => {
-      if (obj && obj.key === state.config.entityKey && obj.methodname === 'createGridColumns') {
-        yes = true;
-      }
+      if (obj && obj.key === state.config.entityKey && obj.methodname === 'createGridColumns') yes = true;
     });
     return yes;
   }
@@ -769,21 +798,15 @@
   function hasHeadMetadata(root) {
     let yes = false;
     deepWalk(root, (obj) => {
-      if (obj && obj.a === 'updateControlMetadata' && Array.isArray(obj.p)) {
-        yes = true;
-      }
+      if (obj && obj.a === 'updateControlMetadata' && Array.isArray(obj.p)) yes = true;
     });
     return yes;
   }
 
   function isFullPayload(root) {
     const entity = findEntity(root);
-    if (entity && entity.dataindex && Array.isArray(entity.rows) && Object.keys(entity.dataindex).length > 5) {
-      return true;
-    }
-    if (entity && (hasCreateGridColumns(root) || hasHeadMetadata(root))) {
-      return true;
-    }
+    if (entity && entity.dataindex && Array.isArray(entity.rows) && Object.keys(entity.dataindex).length > 5) return true;
+    if (entity && (hasCreateGridColumns(root) || hasHeadMetadata(root))) return true;
     return false;
   }
 
@@ -792,25 +815,14 @@
 
     function putField(key, label, sample, source) {
       if (!key) return;
-
       if (!catalog[key]) {
-        catalog[key] = {
-          key,
-          label: label || key,
-          sample: sample || '',
-          source: source || ''
-        };
+        catalog[key] = { key, label: label || key, sample: sample || '', source: source || '' };
       } else {
-        if (label && (!catalog[key].label || catalog[key].label === catalog[key].key)) {
-          catalog[key].label = label;
-        }
-        if (sample && !catalog[key].sample) {
-          catalog[key].sample = sample;
-        }
+        if (label && (!catalog[key].label || catalog[key].label === catalog[key].key)) catalog[key].label = label;
+        if (sample && !catalog[key].sample) catalog[key].sample = sample;
       }
     }
 
-    // 1）列定义：createGridColumns
     deepWalk(root, (obj) => {
       if (
         obj &&
@@ -821,33 +833,19 @@
         Array.isArray(obj.args[0].columns)
       ) {
         obj.args[0].columns.forEach(col => {
-          const key = col?.dataIndex;
-          const label = col?.header?.zh_CN || col?.editor?.caption?.zh_CN;
-          putField(key, label, '', 'gridColumns');
+          putField(col?.dataIndex, col?.header?.zh_CN || col?.editor?.caption?.zh_CN, '', 'gridColumns');
         });
       }
     });
 
-    // 2）页面配置里也有 dataIndex/header/editor.type
     deepWalk(root, (obj) => {
-      if (
-        obj &&
-        typeof obj === 'object' &&
-        typeof obj.dataIndex === 'string' &&
-        obj.header &&
-        obj.header.zh_CN
-      ) {
+      if (obj && typeof obj.dataIndex === 'string' && obj.header && obj.header.zh_CN) {
         putField(obj.dataIndex, obj.header.zh_CN, '', 'columnMeta');
       }
     });
 
-    // 3）material_entity visible/init keys
     deepWalk(root, (obj) => {
-      if (
-        obj &&
-        obj.init === true &&
-        Array.isArray(obj.keys)
-      ) {
+      if (obj && obj.init === true && Array.isArray(obj.keys)) {
         obj.keys.forEach(k => {
           if (Array.isArray(k) && k[0] === 'material_entity' && typeof k[1] === 'string') {
             putField(k[1], k[1], '', 'visibleKeys');
@@ -856,13 +854,9 @@
       }
     });
 
-    // 4）dataindex
     const entity = findEntity(root);
     if (entity && entity.dataindex) {
-      Object.keys(entity.dataindex).forEach(key => {
-        putField(key, key, '', 'dataindex');
-      });
-
+      Object.keys(entity.dataindex).forEach(key => putField(key, key, '', 'dataindex'));
       if (Array.isArray(entity.rows) && entity.rows[0]) {
         const row = entity.rows[0];
         Object.keys(entity.dataindex).forEach(key => {
@@ -872,10 +866,7 @@
       }
     }
 
-    // 5）用户手工字段
-    (state.config.customFields || []).forEach(f => {
-      putField(f.key, f.label || f.key, '', 'custom');
-    });
+    (state.config.customFields || []).forEach(f => putField(f.key, f.label || f.key, '', 'custom'));
 
     return catalog;
   }
@@ -888,53 +879,29 @@
       if (key === 'material_entity' || key === 'express_entity') return;
 
       if (!catalog[key]) {
-        catalog[key] = {
-          key,
-          label: label || key,
-          sample: sample || '',
-          source: source || ''
-        };
+        catalog[key] = { key, label: label || key, sample: sample || '', source: source || '' };
       } else {
-        if (label && (!catalog[key].label || catalog[key].label === catalog[key].key)) {
-          catalog[key].label = label;
-        }
-        if (sample && !catalog[key].sample) {
-          catalog[key].sample = sample;
-        }
+        if (label && (!catalog[key].label || catalog[key].label === catalog[key].key)) catalog[key].label = label;
+        if (sample && !catalog[key].sample) catalog[key].sample = sample;
       }
     }
 
-    // updateControlMetadata 交替数组：key + meta.caption.zh_CN
     deepWalk(root, (obj) => {
       if (obj && obj.a === 'updateControlMetadata' && Array.isArray(obj.p)) {
         for (let i = 0; i < obj.p.length - 1; i++) {
           const key = obj.p[i];
           const meta = obj.p[i + 1];
-
-          if (
-            typeof key === 'string' &&
-            meta &&
-            typeof meta === 'object' &&
-            meta.caption &&
-            meta.caption.zh_CN
-          ) {
+          if (typeof key === 'string' && meta && typeof meta === 'object' && meta.caption && meta.caption.zh_CN) {
             putField(key, meta.caption.zh_CN, '', 'updateControlMetadata');
           }
         }
       }
     });
 
-    // 表头值
     deepWalk(root, (obj) => {
       if (Array.isArray(obj)) {
         obj.forEach(item => {
-          if (
-            item &&
-            typeof item === 'object' &&
-            !Array.isArray(item) &&
-            typeof item.k === 'string' &&
-            Object.prototype.hasOwnProperty.call(item, 'v')
-          ) {
+          if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.k === 'string' && Object.prototype.hasOwnProperty.call(item, 'v')) {
             if (item.k !== 'material_entity' && item.k !== 'express_entity') {
               putField(item.k, catalog[item.k]?.label || item.k, pickDisplayValue(item.v), 'head-value');
             }
@@ -948,17 +915,10 @@
 
   function buildHeadValuesFromPayload(root) {
     const values = {};
-
     deepWalk(root, (obj) => {
       if (Array.isArray(obj)) {
         obj.forEach(item => {
-          if (
-            item &&
-            typeof item === 'object' &&
-            !Array.isArray(item) &&
-            typeof item.k === 'string' &&
-            Object.prototype.hasOwnProperty.call(item, 'v')
-          ) {
+          if (item && typeof item === 'object' && !Array.isArray(item) && typeof item.k === 'string' && Object.prototype.hasOwnProperty.call(item, 'v')) {
             if (item.k !== 'material_entity' && item.k !== 'express_entity') {
               values[item.k] = pickDisplayValue(item.v);
             }
@@ -966,41 +926,28 @@
         });
       }
     });
-
     return values;
   }
 
   function buildButtonHintKeysFromPayload(root) {
     const found = new Set();
-
     deepWalk(root, (obj) => {
-      if (
-        obj &&
-        typeof obj === 'object' &&
-        Array.isArray(obj.keys)
-      ) {
+      if (obj && typeof obj === 'object' && Array.isArray(obj.keys)) {
         obj.keys.forEach(k => {
           if (typeof k === 'string') {
-            if (
-              /^bar_/.test(k) ||
-              /^special_save$/.test(k) ||
-              /^generated_by_bom$/.test(k) ||
-              /^btn_/.test(k)
-            ) {
+            if (/^bar_/.test(k) || /^special_save$/.test(k) || /^generated_by_bom$/.test(k) || /^btn_/.test(k)) {
               found.add(k);
             }
           }
         });
       }
     });
-
     return Array.from(found);
   }
 
   function getSortedFields() {
     const arr = Object.values(state.latestFieldCatalog || {});
     const preferred = state.config.preferredFields || [];
-
     arr.sort((a, b) => {
       const ai = preferred.indexOf(a.key);
       const bi = preferred.indexOf(b.key);
@@ -1009,15 +956,11 @@
       if (bi !== -1) return 1;
       return String(a.label).localeCompare(String(b.label), 'zh-CN');
     });
-
     return arr;
   }
 
   function buildFieldOptions(fieldList) {
-    return fieldList.map(f => ({
-      value: f.key,
-      label: `${f.label} (${f.key})`
-    }));
+    return fieldList.map(f => ({ value: f.key, label: `${f.label} (${f.key})` }));
   }
 
   function isHeadField(fieldKey) {
@@ -1033,22 +976,17 @@
       const f = state.latestHeadFieldCatalog[fieldKey];
       return `[表头] ${f.label} (${f.key})`;
     }
-
     if (isBodyField(fieldKey)) {
       const f = state.latestFieldCatalog[fieldKey];
       return `[表体] ${f.label} (${f.key})`;
     }
-
     const custom = (state.config.customFields || []).find(x => x.key === fieldKey);
     if (custom) return `${custom.label || custom.key} (${custom.key})`;
-
     return fieldKey;
   }
 
   function getHeadFieldValue(fieldKey) {
-    if (Object.prototype.hasOwnProperty.call(state.latestHeadEditDeltas, fieldKey)) {
-      return state.latestHeadEditDeltas[fieldKey];
-    }
+    if (Object.prototype.hasOwnProperty.call(state.latestHeadEditDeltas, fieldKey)) return state.latestHeadEditDeltas[fieldKey];
     return state.latestHeadValues[fieldKey] || '';
   }
 
@@ -1060,7 +998,7 @@
   }
 
   // =========================================================
-  // 八、动态输入增量合并（按 HAR 的 fieldstates / r 学）
+  // 八、动态输入增量
   // =========================================================
   function mergeInputReturnDeltas(root) {
     let changed = false;
@@ -1073,7 +1011,6 @@
       obj.p.forEach(part => {
         if (!part || typeof part !== 'object') return;
 
-        // 表体字段：material_entity.fieldstates
         if (part.k === 'material_entity' && Array.isArray(part.fieldstates)) {
           part.fieldstates.forEach(fs => {
             const k = fs.k;
@@ -1094,7 +1031,6 @@
           return;
         }
 
-        // 表头 fieldstates
         if (Array.isArray(part.fieldstates)) {
           part.fieldstates.forEach(fs => {
             if (fs && fs.k) {
@@ -1105,13 +1041,7 @@
           return;
         }
 
-        // 表头单值
-        if (
-          typeof part.k === 'string' &&
-          Object.prototype.hasOwnProperty.call(part, 'v') &&
-          part.k !== 'material_entity' &&
-          part.k !== 'express_entity'
-        ) {
+        if (typeof part.k === 'string' && Object.prototype.hasOwnProperty.call(part, 'v') && part.k !== 'material_entity' && part.k !== 'express_entity') {
           headDelta[part.k] = pickDisplayValue(part.v);
           changed = true;
         }
@@ -1132,59 +1062,26 @@
   function applyRowDeltas(displayValues, displayRowIndex, zeroBasedIndex) {
     const zeroDelta = state.latestBodyEditDeltas[String(zeroBasedIndex)];
     const displayDelta = state.latestBodyEditDeltas[String(displayRowIndex)];
-
-    if (zeroDelta) {
-      Object.keys(zeroDelta).forEach(k => {
-        displayValues[k] = zeroDelta[k];
-      });
-    }
-
-    if (displayDelta) {
-      Object.keys(displayDelta).forEach(k => {
-        displayValues[k] = displayDelta[k];
-      });
-    }
-
+    if (zeroDelta) Object.keys(zeroDelta).forEach(k => { displayValues[k] = zeroDelta[k]; });
+    if (displayDelta) Object.keys(displayDelta).forEach(k => { displayValues[k] = displayDelta[k]; });
     return displayValues;
   }
 
   // =========================================================
-  // 九、DOM 抓取（按 HAR 里的 material_entity DOM 结构学）
+  // 九、DOM 行读取
   // =========================================================
-  function getCellLiveText(td) {
-    const input = td.querySelector('input, textarea, select');
-    if (input) {
-      return normalizeText(input.value || input.getAttribute('value') || input.innerText || input.textContent);
-    }
-
-    const editor = td.querySelector('[contenteditable="true"]');
-    if (editor) {
-      return normalizeText(editor.innerText || editor.textContent);
-    }
-
-    return normalizeText(td.innerText || td.textContent);
-  }
-
   function mapHeaderTextToFieldKey(title) {
     const text = normalizeText(title);
     const fieldList = Object.values(state.latestFieldCatalog || {});
-
-    let matched = fieldList.find(f =>
-      normalizeText(f.label) === text ||
-      normalizeText(f.key) === text ||
-      text.includes(normalizeText(f.label))
-    );
-
+    let matched = fieldList.find(f => normalizeText(f.label) === text || normalizeText(f.key) === text || text.includes(normalizeText(f.label)));
     if (!matched && text === '商品名称') matched = fieldList.find(f => f.key === 'material_name');
     if (!matched && text === '规格型号') matched = fieldList.find(f => f.key === 'material_model');
     if (!matched && (text === '换算公式' || text === '换算关系')) matched = fieldList.find(f => f.key === 'conversionrate');
     if (!matched && text === '数量') matched = fieldList.find(f => f.key === 'qty');
-    if (!matched && text === '辅助单位') matched = fieldList.find(f => f.key === 'auxunitid');
     if (!matched && text === '辅助数量') matched = fieldList.find(f => f.key === 'auxqty');
     if (!matched && text === '基本单位') matched = fieldList.find(f => f.key === 'baseunit');
     if (!matched && text === '基本数量') matched = fieldList.find(f => f.key === 'baseqty');
     if (!matched && (text === '序号' || text === '行号')) matched = fieldList.find(f => f.key === 'seq');
-
     return matched ? matched.key : '';
   }
 
@@ -1202,13 +1099,9 @@
 
   function pickBestBodyTable(root) {
     if (!root) return null;
-
-    const tables = Array.from(root.querySelectorAll('.kd-table-body table, table'))
-      .filter(isElementVisible);
-
+    const tables = Array.from(root.querySelectorAll('.kd-table-body table, table')).filter(isElementVisible);
     let best = null;
     let bestScore = -1;
-
     tables.forEach(table => {
       const rowCount = table.querySelectorAll('tbody tr').length;
       const cellCount = table.querySelectorAll('tbody tr td').length;
@@ -1218,8 +1111,15 @@
         best = table;
       }
     });
-
     return best;
+  }
+
+  function getCellLiveText(td) {
+    const input = td.querySelector('input, textarea, select');
+    if (input) return normalizeText(input.value || input.getAttribute('value') || input.innerText || input.textContent);
+    const editor = td.querySelector('[contenteditable="true"]');
+    if (editor) return normalizeText(editor.innerText || editor.textContent);
+    return normalizeText(td.innerText || td.textContent);
   }
 
   function collectRowsFromMaterialTableDom() {
@@ -1237,10 +1137,7 @@
     if (!table) return [];
 
     const rows = [];
-    const bodyRows = Array.from(table.querySelectorAll('tbody tr')).filter(tr => {
-      if (!isElementVisible(tr)) return false;
-      return tr.querySelectorAll('td').length > 0;
-    });
+    const bodyRows = Array.from(table.querySelectorAll('tbody tr')).filter(tr => isElementVisible(tr) && tr.querySelectorAll('td').length > 0);
 
     bodyRows.forEach((tr, i) => {
       const cells = Array.from(tr.querySelectorAll('td'));
@@ -1257,7 +1154,6 @@
 
       if (Object.keys(displayValues).length) {
         applyRowDeltas(displayValues, i + 1, i);
-
         rows.push({
           rowIndex: i + 1,
           seq: rowSeq,
@@ -1285,24 +1181,17 @@
       const hasCoreFields = headerMap.includes('material_model') || headerMap.includes('conversionrate');
       if (!hasCoreFields) return;
 
-      const bodyRows = Array.from(table.querySelectorAll('tbody tr')).filter(tr => {
-        if (!isElementVisible(tr)) return false;
-        return tr.querySelectorAll('td').length > 0;
-      });
-
+      const bodyRows = Array.from(table.querySelectorAll('tbody tr')).filter(tr => isElementVisible(tr) && tr.querySelectorAll('td').length > 0);
       bodyRows.forEach((tr, i) => {
         const cells = Array.from(tr.querySelectorAll('td'));
         const displayValues = {};
-
         cells.forEach((td, idx) => {
           const fieldKey = headerMap[idx];
           if (!fieldKey) return;
           displayValues[fieldKey] = getCellLiveText(td);
         });
-
         if (Object.keys(displayValues).length) {
           applyRowDeltas(displayValues, i + 1, i);
-
           rows.push({
             rowIndex: i + 1,
             seq: displayValues.seq || String(i + 1),
@@ -1320,16 +1209,13 @@
 
   function convertEntityToRows(entity) {
     if (!entity || !entity.dataindex || !Array.isArray(entity.rows)) return [];
-
     const keys = Object.keys(entity.dataindex);
     return entity.rows.map((row, i) => {
       const displayValues = {};
       keys.forEach(key => {
         displayValues[key] = pickDisplayValue(row[entity.dataindex[key]]);
       });
-
       applyRowDeltas(displayValues, i + 1, i);
-
       return {
         rowIndex: i + 1,
         seq: displayValues.seq || String(i + 1),
@@ -1360,55 +1246,31 @@
   }
 
   // =========================================================
-  // 十、按钮抓取（DOM + 可见性清单）
+  // 十、按钮目录 / 范围预设
   // =========================================================
   function scanButtonsFromDom() {
     const found = [];
-
     const toolRoots = Array.from(document.querySelectorAll('#common_tool, [id="common_tool"]'));
-    toolRoots.forEach(root => {
-      const nodes = Array.from(
-        root.querySelectorAll('[data-type="baritem"][data-btn-key], [data-type="baritem"][id]')
-      );
 
+    toolRoots.forEach(root => {
+      const nodes = Array.from(root.querySelectorAll('[data-type="baritem"][data-btn-key], [data-type="baritem"][id]'));
       nodes.forEach(node => {
         const btnKey = normalizeText(node.getAttribute('data-btn-key'));
         const id = normalizeText(node.id);
         const opk = normalizeText(node.getAttribute('data-opk'));
-        const title =
-          normalizeText(node.getAttribute('data-title')) ||
-          normalizeText(node.getAttribute('title')) ||
-          normalizeText(node.textContent);
-
+        const title = normalizeText(node.getAttribute('data-title') || node.getAttribute('title') || node.textContent);
         if (!btnKey && !id && !opk) return;
-
-        found.push({
-          title: title || btnKey || id || opk,
-          btnKey,
-          id,
-          opk,
-          enabled: false
-        });
+        found.push({ title: title || btnKey || id || opk, btnKey, id, opk, enabled: false });
       });
     });
 
-    // 从 payload 的 visible keys 里补一层
     (state.latestButtonHintKeys || []).forEach(k => {
       const exists = found.find(x => x.btnKey === k || x.id === k || x.opk === k);
-      if (!exists) {
-        found.push({
-          title: k,
-          btnKey: k,
-          id: k,
-          opk: '',
-          enabled: false
-        });
-      }
+      if (!exists) found.push({ title: k, btnKey: k, id: k, opk: '', enabled: false });
     });
 
     const uniq = [];
     const seen = new Set();
-
     found.forEach(btn => {
       const key = [btn.btnKey, btn.id, btn.opk].join('|');
       if (!seen.has(key)) {
@@ -1418,30 +1280,14 @@
     });
 
     const currentCfg = state.config.buttonsCatalog || [];
-
     const merged = uniq.map(btn => {
-      const exists = currentCfg.find(x =>
-        x.btnKey === btn.btnKey &&
-        x.id === btn.id &&
-        x.opk === btn.opk
-      );
-
-      const autoEnabled = /save|submit|audit|out|close|special_save|generated_by_bom/i.test(
-        [btn.btnKey, btn.id, btn.opk, btn.title].join(' ')
-      );
-
-      return {
-        ...btn,
-        enabled: exists ? !!exists.enabled : autoEnabled
-      };
+      const exists = currentCfg.find(x => x.btnKey === btn.btnKey && x.id === btn.id && x.opk === btn.opk);
+      const autoEnabled = /save|submit|audit|out|close|special_save|generated_by_bom/i.test([btn.btnKey, btn.id, btn.opk, btn.title].join(' '));
+      return { ...btn, enabled: exists ? !!exists.enabled : autoEnabled };
     });
 
     currentCfg.forEach(btn => {
-      const exists = merged.find(x =>
-        x.btnKey === btn.btnKey &&
-        x.id === btn.id &&
-        x.opk === btn.opk
-      );
+      const exists = merged.find(x => x.btnKey === btn.btnKey && x.id === btn.id && x.opk === btn.opk);
       if (!exists) merged.push(btn);
     });
 
@@ -1449,69 +1295,30 @@
     state.config.buttonsCatalog = merged;
   }
 
-  // =========================================================
-  // 十一、页面范围预设
-  // =========================================================
   function scanPageScopesFromDom() {
     syncCurrentPageMeta();
-
     const scopes = [];
     const cnName = getLikelyPageCnName();
     const urlText = location.pathname + location.search;
     const ctx = getPageContext();
 
-    if (normalizeText(ctx.formId)) {
-      scopes.push({
-        type: 'formIdEq',
-        value: normalizeText(ctx.formId),
-        label: `${cnName} / formId = ${normalizeText(ctx.formId)}`
-      });
-    }
-
-    if (normalizeText(ctx.formName)) {
-      scopes.push({
-        type: 'formNameContains',
-        value: normalizeText(ctx.formName),
-        label: `${cnName} / 中文名 = ${normalizeText(ctx.formName)}`
-      });
-    }
+    if (normalizeText(ctx.formId)) scopes.push({ type: 'formIdEq', value: normalizeText(ctx.formId), label: `${cnName} / formId = ${normalizeText(ctx.formId)}` });
+    if (normalizeText(ctx.formName)) scopes.push({ type: 'formNameContains', value: normalizeText(ctx.formName), label: `${cnName} / 中文名 = ${normalizeText(ctx.formName)}` });
 
     const commonContent = document.querySelector('#common_content[data-page-id]');
     const commonTool = document.querySelector('#common_tool[data-page-id]');
-
     if (commonContent) {
       const pid = normalizeText(commonContent.getAttribute('data-page-id'));
-      if (pid) {
-        scopes.push({
-          type: 'pageIdIncludes',
-          value: pid,
-          label: `${cnName} / 内容区`
-        });
-      }
+      if (pid) scopes.push({ type: 'pageIdIncludes', value: pid, label: `${cnName} / 内容区` });
     }
-
     if (commonTool) {
       const pid = normalizeText(commonTool.getAttribute('data-page-id'));
-      if (pid) {
-        scopes.push({
-          type: 'pageIdIncludes',
-          value: pid,
-          label: `${cnName} / 业务工具栏`
-        });
-      }
+      if (pid) scopes.push({ type: 'pageIdIncludes', value: pid, label: `${cnName} / 业务工具栏` });
     }
-
-    if (urlText) {
-      scopes.push({
-        type: 'urlIncludes',
-        value: urlText,
-        label: `${cnName} / 当前URL`
-      });
-    }
+    if (urlText) scopes.push({ type: 'urlIncludes', value: urlText, label: `${cnName} / 当前URL` });
 
     const uniq = [];
     const seen = new Set();
-
     scopes.forEach(item => {
       const key = `${item.type}|${item.value}`;
       if (!seen.has(key)) {
@@ -1519,20 +1326,29 @@
         uniq.push(item);
       }
     });
-
     state.latestPageScopes = uniq;
   }
 
   function getPageScopeOptions() {
-    return (state.latestPageScopes || []).map(item => ({
-      value: `${item.type}|||${item.value}`,
-      label: item.label
-    }));
+    return (state.latestPageScopes || []).map(item => ({ value: `${item.type}|||${item.value}`, label: item.label }));
   }
 
   // =========================================================
-  // 十二、规则判断
+  // 十一、规则执行
   // =========================================================
+  function rowPassesRuleFilters(rule, row) {
+    const filters = rule.filters || {};
+    const currentFormId = normalizeText(state.currentPageMeta.formId);
+    const materialId = getContextFieldValue(row, 'materialid');
+    const materialCategory = getContextFieldValue(row, 'material_category');
+
+    if (!matchTokenList(currentFormId, filters.formIds, false)) return false;
+    if (!matchTokenList(materialId, filters.materialIds, false)) return false;
+    if (!matchTokenList(materialCategory, filters.materialCategories, true)) return false;
+
+    return true;
+  }
+
   function evalCondition(condition, row) {
     const leftRaw = getContextFieldValue(row, condition.leftField);
     const leftValue = applyTransform(leftRaw, condition.leftTransform || 'raw');
@@ -1549,7 +1365,7 @@
     }
 
     return {
-      matched: compareValues(leftValue, condition.operator, rightValue),
+      matched: compareValues(leftValue, condition.operator, rightValue, condition.compareMode, condition.tolerance),
       leftRaw,
       leftValue,
       rightRaw,
@@ -1560,12 +1376,10 @@
   function evalRule(rule, row) {
     if (!rule.enabled) return { matched: false, details: [] };
     if (!ruleMatchesScope(rule)) return { matched: false, details: [] };
+    if (!rowPassesRuleFilters(rule, row)) return { matched: false, details: [] };
 
     const details = (rule.conditions || []).map(cond => evalCondition(cond, row));
-    const matched = rule.matchMode === 'any'
-      ? details.some(d => d.matched)
-      : details.every(d => d.matched);
-
+    const matched = rule.matchMode === 'any' ? details.some(d => d.matched) : details.every(d => d.matched);
     return { matched, details };
   }
 
@@ -1588,17 +1402,8 @@
       (state.config.rules || []).forEach(rule => {
         const result = evalRule(rule, item);
         if (!result.matched) return;
-
-        item.matchedRules.push({
-          id: rule.id,
-          name: rule.name,
-          action: rule.action,
-          details: result.details
-        });
-
-        if (severity(rule.action) > severity(finalAction)) {
-          finalAction = rule.action;
-        }
+        item.matchedRules.push({ id: rule.id, name: rule.name, action: rule.action, details: result.details });
+        if (severity(rule.action) > severity(finalAction)) finalAction = rule.action;
       });
 
       if (finalAction === 'block') blockItems.push(item);
@@ -1615,7 +1420,7 @@
     });
   }
 
-  function applyAnalysisResult(result, source) {
+  function applyAnalysisResult(result) {
     const hash = makeDataHash(result.blockItems, result.warnItems);
     const changed = hash !== state.lastDataHash;
 
@@ -1623,22 +1428,14 @@
     state.warnItems = result.warnItems;
     state.lastDataHash = hash;
 
-    if (state.blockItems.length || state.warnItems.length) {
-      updateBanner(changed);
-    } else {
-      removeBanner();
-    }
+    if (state.blockItems.length || state.warnItems.length) updateBanner(changed);
+    else removeBanner();
 
-    if (!state.panelOpen) {
-      renderPanelContent();
-    } else {
-      state.panelDirty = true;
-    }
-
-    log('applyAnalysisResult', source, result);
+    if (!state.panelOpen) renderPanelContent();
+    else state.panelDirty = true;
   }
 
-  function applyPayload(root, source, clearDeltas) {
+  function applyPayload(root, clearDeltas) {
     const entity = findEntity(root);
     if (!entity) return false;
 
@@ -1660,35 +1457,28 @@
     return true;
   }
 
-  function runLiveCheck(source) {
+  function runLiveCheck() {
     syncCurrentPageMeta();
     scanButtonsFromDom();
     scanPageScopesFromDom();
-
     const rows = getLatestRowsForCheck();
     const analyzed = analyzeRowsByRules(rows);
-    applyAnalysisResult(analyzed, source || 'live');
+    applyAnalysisResult(analyzed);
   }
 
-  function tryHandleResponseData(data, source) {
+  function tryHandleResponseData(data) {
     if (!data) return;
-
     syncCurrentPageMeta();
 
     const full = isFullPayload(data);
-    if (full) {
-      applyPayload(data, source, true);
-    }
+    if (full) applyPayload(data, true);
 
     const deltaChanged = mergeInputReturnDeltas(data);
-
-    if (full || deltaChanged) {
-      runLiveCheck(full && deltaChanged ? 'full+inputReturn' : full ? 'full-payload' : 'input-return-delta');
-    }
+    if (full || deltaChanged) runLiveCheck();
   }
 
   // =========================================================
-  // 十三、请求拦截
+  // 十二、请求拦截
   // =========================================================
   function patchFetch() {
     if (!window.fetch) return;
@@ -1700,26 +1490,18 @@
         const init = arguments[1] || {};
         const url = typeof input === 'string' ? input : (input && input.url ? input.url : '');
         const body = init && init.body ? init.body : '';
-
-        const meta = parseFormMetaFromRequest(url, body);
-        const ctx = parseActionContextFromRequest(url, body);
-
-        mergeLatestSeenFormMeta(meta);
-        mergeLatestActionContext(ctx);
+        mergeLatestSeenFormMeta(parseFormMetaFromRequest(url, body));
+        mergeLatestActionContext(parseActionContextFromRequest(url, body));
         syncCurrentPageMeta();
-      } catch (e) {
-        log('fetch request parse fail', e);
-      }
+      } catch (e) {}
 
       const res = await rawFetch.apply(this, arguments);
 
       try {
         const text = await res.clone().text();
         const json = safeJsonParse(text);
-        if (json) tryHandleResponseData(json, 'fetch');
-      } catch (e) {
-        log('fetch parse response fail', e);
-      }
+        if (json) tryHandleResponseData(json);
+      } catch (e) {}
 
       return res;
     };
@@ -1730,31 +1512,23 @@
     const rawSend = XMLHttpRequest.prototype.send;
 
     XMLHttpRequest.prototype.open = function (method, url) {
-      this.__jdy_method__ = method || '';
       this.__jdy_url__ = url || '';
       return rawOpen.apply(this, arguments);
     };
 
     XMLHttpRequest.prototype.send = function (body) {
       try {
-        const meta = parseFormMetaFromRequest(this.__jdy_url__ || '', body || '');
-        const ctx = parseActionContextFromRequest(this.__jdy_url__ || '', body || '');
-
-        mergeLatestSeenFormMeta(meta);
-        mergeLatestActionContext(ctx);
+        mergeLatestSeenFormMeta(parseFormMetaFromRequest(this.__jdy_url__ || '', body || ''));
+        mergeLatestActionContext(parseActionContextFromRequest(this.__jdy_url__ || '', body || ''));
         syncCurrentPageMeta();
-      } catch (e) {
-        log('xhr request parse fail', e);
-      }
+      } catch (e) {}
 
       this.addEventListener('load', function () {
         try {
           if (typeof this.responseText !== 'string') return;
           const json = safeJsonParse(this.responseText);
-          if (json) tryHandleResponseData(json, 'xhr');
-        } catch (e) {
-          log('xhr parse response fail', e);
-        }
+          if (json) tryHandleResponseData(json);
+        } catch (e) {}
       });
 
       return rawSend.apply(this, arguments);
@@ -1762,7 +1536,7 @@
   }
 
   // =========================================================
-  // 十四、按钮拦截
+  // 十三、按钮拦截
   // =========================================================
   function isInsideOurUi(node) {
     return node instanceof Element && !!node.closest(`#${MODAL_ID}, #${BANNER_ID}, #${PANEL_ID}, #${FAB_ID}`);
@@ -1772,7 +1546,6 @@
     const btnKey = normalizeText(node.getAttribute?.('data-btn-key'));
     const opk = normalizeText(node.getAttribute?.('data-opk'));
     const id = normalizeText(node.id);
-
     return (state.config.buttonsCatalog || []).some(btn =>
       btn.enabled && (
         (btn.btnKey && btn.btnKey === btnKey) ||
@@ -1796,10 +1569,7 @@
       const id = normalizeText(node.id);
       const opk = normalizeText(node.getAttribute?.('data-opk'));
       const isToolbarButton = node.getAttribute?.('data-type') === 'baritem' || node.hasAttribute?.('buttontype');
-
-      if (isToolbarButton && (btnKey || id || opk)) {
-        return null;
-      }
+      if (isToolbarButton && (btnKey || id || opk)) return null;
 
       node = node.parentElement;
       depth++;
@@ -1826,7 +1596,6 @@
     if (state.bypassRoot !== root) return false;
     if (Date.now() > state.bypassUntil) return false;
     if (state.bypassRemaining <= 0) return false;
-
     state.bypassRemaining -= 1;
     if (state.bypassRemaining <= 0) {
       state.bypassRoot = null;
@@ -1838,7 +1607,6 @@
   function replayAction(root) {
     if (!(root instanceof Element)) return;
     armBypass(root, 4);
-
     setTimeout(() => {
       try { root.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, composed: true })); } catch (e) {}
       try { root.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, composed: true })); } catch (e) {}
@@ -1852,28 +1620,24 @@
   function blockEvent(evt) {
     evt.preventDefault();
     evt.stopPropagation();
-    if (typeof evt.stopImmediatePropagation === 'function') {
-      evt.stopImmediatePropagation();
-    }
+    if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
   }
 
   function interceptActions() {
     const handler = function (evt) {
       const matchedRoot = findMatchedActionRoot(evt.target);
       if (!matchedRoot) return;
-
       if (consumeBypassIfMatch(matchedRoot)) return;
       if (shouldDebounceIntercept()) return;
 
       blockEvent(evt);
-
       syncCurrentPageMeta();
       scanButtonsFromDom();
       scanPageScopesFromDom();
 
       const rows = getLatestRowsForCheck();
       const analyzed = analyzeRowsByRules(rows);
-      applyAnalysisResult(analyzed, 'before-submit');
+      applyAnalysisResult(analyzed);
       updateBanner(true);
 
       if (state.blockItems.length) {
@@ -1894,7 +1658,7 @@
   }
 
   // =========================================================
-  // 十五、样式 / 弹窗 / Banner
+  // 十四、UI
   // =========================================================
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
@@ -1916,16 +1680,14 @@
         box-shadow: 0 8px 24px rgba(0,0,0,.2);
         user-select: none;
       }
-
       #${PANEL_WRAP_ID} {
         position: fixed;
         left: 16px;
         bottom: 58px;
         z-index: 2147483646;
       }
-
       #${PANEL_ID} {
-        width: 620px;
+        width: 660px;
         max-height: 78vh;
         overflow: auto;
         background: #fff;
@@ -1935,7 +1697,6 @@
         color: #262626;
         font-size: 13px;
       }
-
       #${PANEL_ID} .hd {
         position: sticky;
         top: 0;
@@ -1944,12 +1705,10 @@
         border-bottom: 1px solid #f0f0f0;
         z-index: 2;
       }
-
       #${PANEL_ID} .title { font-size: 16px; font-weight: 700; }
       #${PANEL_ID} .sub { margin-top: 4px; color: #8c8c8c; line-height: 1.6; }
       #${PANEL_ID} .sec { padding: 12px 14px; border-bottom: 1px solid #f5f5f5; }
       #${PANEL_ID} .sec h4 { margin: 0 0 8px 0; font-size: 14px; }
-
       #${PANEL_ID} .row {
         display: flex;
         gap: 8px;
@@ -1957,7 +1716,6 @@
         margin-bottom: 8px;
         flex-wrap: wrap;
       }
-
       #${PANEL_ID} input[type="text"],
       #${PANEL_ID} select {
         border: 1px solid #d9d9d9;
@@ -1965,7 +1723,6 @@
         padding: 6px 8px;
         font-size: 12px;
       }
-
       #${PANEL_ID} button {
         border: none;
         background: #1677ff;
@@ -1975,10 +1732,8 @@
         cursor: pointer;
         font-size: 12px;
       }
-
       #${PANEL_ID} button.gray { background: #8c8c8c; }
       #${PANEL_ID} button.red { background: #ff4d4f; }
-
       #${PANEL_ID} .field-table,
       #${PANEL_ID} .rule-card,
       #${PANEL_ID} .btn-table {
@@ -1987,14 +1742,12 @@
         padding: 8px;
         margin-top: 8px;
       }
-
       #${PANEL_ID} .field-table table,
       #${PANEL_ID} .btn-table table {
         width: 100%;
         border-collapse: collapse;
         font-size: 12px;
       }
-
       #${PANEL_ID} .field-table th,
       #${PANEL_ID} .field-table td,
       #${PANEL_ID} .btn-table th,
@@ -2004,19 +1757,13 @@
         padding: 6px 4px;
         vertical-align: top;
       }
-
       #${PANEL_ID} .condition {
         border: 1px dashed #d9d9d9;
         border-radius: 8px;
         padding: 8px;
         margin-top: 8px;
       }
-
-      #${PANEL_ID} .tiny {
-        color: #8c8c8c;
-        font-size: 12px;
-      }
-
+      #${PANEL_ID} .tiny { color: #8c8c8c; font-size: 12px; }
       #${BANNER_ID} {
         position: fixed;
         right: 16px;
@@ -2032,7 +1779,6 @@
         font-size: 13px;
         line-height: 1.6;
       }
-
       #${BANNER_ID} .close-x {
         position: absolute;
         right: 10px;
@@ -2041,7 +1787,6 @@
         font-size: 16px;
         color: #8c8c8c;
       }
-
       #${MODAL_ID} {
         position: fixed;
         inset: 0;
@@ -2051,7 +1796,6 @@
         align-items: center;
         justify-content: center;
       }
-
       #${MODAL_ID} .box {
         width: min(920px, calc(100vw - 32px));
         max-height: 80vh;
@@ -2061,22 +1805,18 @@
         box-shadow: 0 12px 36px rgba(0,0,0,.25);
         padding: 20px;
       }
-
       #${MODAL_ID} .title {
         font-size: 18px;
         font-weight: 700;
         color: #cf1322;
         margin-bottom: 12px;
       }
-
       #${MODAL_ID} .desc {
         color: #595959;
         margin-bottom: 12px;
         line-height: 1.8;
       }
-
       #${MODAL_ID} ol { padding-left: 20px; }
-
       #${MODAL_ID} li {
         margin-bottom: 10px;
         line-height: 1.8;
@@ -2086,12 +1826,10 @@
         padding: 10px 12px;
         list-style-position: inside;
       }
-
       #${MODAL_ID} .actions {
         margin-top: 16px;
         text-align: right;
       }
-
       #${MODAL_ID} button {
         border: none;
         background: #cf1322;
@@ -2101,16 +1839,10 @@
         cursor: pointer;
         margin-left: 8px;
       }
-
       #${MODAL_ID} .secondary { background: #8c8c8c; }
     `;
 
     document.documentElement.appendChild(style);
-  }
-
-  function removeBanner() {
-    const banner = document.getElementById(BANNER_ID);
-    if (banner) banner.remove();
   }
 
   function updateBanner(forceShow) {
@@ -2130,13 +1862,9 @@
     }
 
     let desc = '';
-    if (blockCount && warnCount) {
-      desc = `拦截 ${blockCount} 条，提示 ${warnCount} 条。`;
-    } else if (blockCount) {
-      desc = `拦截 ${blockCount} 条。`;
-    } else {
-      desc = `提示 ${warnCount} 条。`;
-    }
+    if (blockCount && warnCount) desc = `拦截 ${blockCount} 条，提示 ${warnCount} 条。`;
+    else if (blockCount) desc = `拦截 ${blockCount} 条。`;
+    else desc = `提示 ${warnCount} 条。`;
 
     let banner = document.getElementById(BANNER_ID);
     if (!banner) {
@@ -2161,14 +1889,8 @@
     }
   }
 
-  function closeModal() {
-    const modal = document.getElementById(MODAL_ID);
-    if (modal) modal.remove();
-  }
-
   function getReferencedFields(items) {
-    const keys = new Set(['seq', 'material_name', 'materialid']);
-
+    const keys = new Set(['seq', 'material_name', 'materialid', 'material_category']);
     items.forEach(item => {
       (item.matchedRules || []).forEach(rule => {
         const ruleCfg = (state.config.rules || []).find(r => r.id === rule.id);
@@ -2179,22 +1901,18 @@
         });
       });
     });
-
     return Array.from(keys);
   }
 
   function renderPopupItems(items) {
     const fields = getReferencedFields(items);
-
     return items.slice(0, state.config.ui.maxPopupItems).map(item => {
       const rulesText = (item.matchedRules || []).map(r => `${r.name}【${r.action}】`).join('；');
-
       const fieldRows = fields.map(key => {
         const label = getAnyFieldLabel(key);
         const value = getContextFieldValue(item, key);
         return `<div><span style="color:#8c8c8c;">${escapeHtml(label)}：</span><b>${escapeHtml(value || '-')}</b></div>`;
       }).join('');
-
       return `
         <li>
           <div><b>第 ${escapeHtml(item.seq)} 行</b>${item.materialName ? `　商品：<b>${escapeHtml(item.materialName)}</b>` : ''}</div>
@@ -2209,7 +1927,6 @@
   function showBlockModal(items) {
     ensureStyle();
     closeModal();
-
     const modal = document.createElement('div');
     modal.id = MODAL_ID;
     modal.innerHTML = `
@@ -2222,21 +1939,15 @@
         </div>
       </div>
     `;
-
     document.body.appendChild(modal);
-
     const btn = document.getElementById('__jdy_rule_block_close__');
     if (btn) btn.addEventListener('click', closeModal);
-
-    modal.addEventListener('click', e => {
-      if (e.target === modal) closeModal();
-    });
+    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
   }
 
   function showWarnModal(items, onContinue) {
     ensureStyle();
     closeModal();
-
     const modal = document.createElement('div');
     modal.id = MODAL_ID;
     modal.innerHTML = `
@@ -2250,7 +1961,6 @@
         </div>
       </div>
     `;
-
     document.body.appendChild(modal);
 
     const backBtn = document.getElementById('__jdy_rule_warn_back__');
@@ -2264,13 +1974,11 @@
       });
     }
 
-    modal.addEventListener('click', e => {
-      if (e.target === modal) closeModal();
-    });
+    modal.addEventListener('click', e => { if (e.target === modal) closeModal(); });
   }
 
   // =========================================================
-  // 十六、面板
+  // 十五、面板
   // =========================================================
   function optionHtml(options, currentValue) {
     return options.map(opt => `
@@ -2294,9 +2002,7 @@
   }
 
   function val(selectorOrId) {
-    const el = selectorOrId.startsWith('[') || selectorOrId.startsWith('#')
-      ? qs(selectorOrId)
-      : document.getElementById(selectorOrId);
+    const el = selectorOrId.startsWith('[') || selectorOrId.startsWith('#') ? qs(selectorOrId) : document.getElementById(selectorOrId);
     return el ? el.value : '';
   }
 
@@ -2318,6 +2024,7 @@
       matchMode: 'all',
       scopeType: 'all',
       scopeValue: '',
+      filters: { formIds: '', materialIds: '', materialCategories: '' },
       conditions: [newCondition()]
     };
   }
@@ -2332,16 +2039,15 @@
       rightType: 'value',
       rightField: '',
       rightTransform: 'raw',
-      rightValue: ''
+      rightValue: '',
+      compareMode: 'auto',
+      tolerance: '0.001'
     };
   }
 
   function renderHeadFieldsHtml() {
     const rows = Object.values(state.latestHeadFieldCatalog || {});
-
-    if (!rows.length) {
-      return `<div class="tiny">当前还没有抓到单据表头字段。先打开一张单据，再点“重新渲染”。</div>`;
-    }
+    if (!rows.length) return `<div class="tiny">当前还没有抓到单据表头字段。先打开一张单据，再点“重新渲染”。</div>`;
 
     rows.sort((a, b) => String(a.label).localeCompare(String(b.label), 'zh-CN'));
 
@@ -2373,10 +2079,7 @@
 
   function renderButtonsTableHtml() {
     const rows = state.latestButtonCatalog || [];
-
-    if (!rows.length) {
-      return `<div class="tiny">当前页面还没有抓到按钮。先打开单据页工具栏，再点“重新渲染”。</div>`;
-    }
+    if (!rows.length) return `<div class="tiny">当前页面还没有抓到按钮。先打开单据页工具栏，再点“重新渲染”。</div>`;
 
     return `
       <div class="btn-table">
@@ -2433,10 +2136,16 @@
           </select>
         </div>
 
+        <div class="row">
+          <input type="text" data-role="filter-formids" data-rule-id="${escapeHtml(rule.id)}" value="${escapeHtml(rule.filters?.formIds || '')}" placeholder="过滤：单据类型 formId，多个用逗号/换行" style="width:220px;">
+          <input type="text" data-role="filter-materialids" data-rule-id="${escapeHtml(rule.id)}" value="${escapeHtml(rule.filters?.materialIds || '')}" placeholder="过滤：商品编码 materialid" style="width:180px;">
+          <input type="text" data-role="filter-categories" data-rule-id="${escapeHtml(rule.id)}" value="${escapeHtml(rule.filters?.materialCategories || '')}" placeholder="过滤：商品类别 material_category" style="width:180px;">
+        </div>
+
         ${(rule.conditions || []).map(cond => `
           <div class="condition" data-cond-id="${escapeHtml(cond.id)}">
             <div class="row">
-              <select data-role="cond-left-field" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" style="min-width:260px;">
+              <select data-role="cond-left-field" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" style="min-width:230px;">
                 ${optionHtml(fieldOptions, cond.leftField)}
               </select>
               <select data-role="cond-left-transform" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}">
@@ -2452,24 +2161,28 @@
                 ${optionHtml(RIGHT_TYPE_OPTIONS, cond.rightType)}
               </select>
 
-              ${
-                cond.rightType === 'field'
-                  ? `
-                    <select data-role="cond-right-field" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" style="min-width:260px;">
+              ${cond.rightType === 'field'
+                ? `
+                    <select data-role="cond-right-field" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" style="min-width:230px;">
                       ${optionHtml(fieldOptions, cond.rightField)}
                     </select>
                     <select data-role="cond-right-transform" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}">
                       ${optionHtml(TRANSFORMS.map(x => ({ value: x.value, label: x.label })), cond.rightTransform)}
                     </select>
                   `
-                  : `
-                    <input type="text" data-role="cond-right-value" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" value="${escapeHtml(cond.rightValue || '')}" placeholder="固定值" style="width:240px;">
+                : `
+                    <input type="text" data-role="cond-right-value" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" value="${escapeHtml(cond.rightValue || '')}" placeholder="固定值" style="width:220px;">
                     <select data-role="cond-right-transform" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}">
                       ${optionHtml(TRANSFORMS.map(x => ({ value: x.value, label: x.label })), cond.rightTransform)}
                     </select>
-                  `
-              }
+                  `}
+            </div>
 
+            <div class="row">
+              <select data-role="cond-compare-mode" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}">
+                ${optionHtml(COMPARE_MODES, cond.compareMode || 'auto')}
+              </select>
+              <input type="text" data-role="cond-tolerance" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}" value="${escapeHtml(cond.tolerance || '0.001')}" placeholder="误差，例如 0.001" style="width:140px;">
               <button class="red" data-role="remove-cond" data-rule-id="${escapeHtml(rule.id)}" data-cond-id="${escapeHtml(cond.id)}">删除条件</button>
             </div>
           </div>
@@ -2497,6 +2210,10 @@
       rule.enabled = checked(`[data-role="rule-enabled"][data-rule-id="${css(rule.id)}"]`);
       rule.scopeType = val(`[data-role="rule-scope-type"][data-rule-id="${css(rule.id)}"]`);
       rule.scopeValue = val(`[data-role="rule-scope-value"][data-rule-id="${css(rule.id)}"]`);
+      rule.filters = rule.filters || { formIds: '', materialIds: '', materialCategories: '' };
+      rule.filters.formIds = val(`[data-role="filter-formids"][data-rule-id="${css(rule.id)}"]`);
+      rule.filters.materialIds = val(`[data-role="filter-materialids"][data-rule-id="${css(rule.id)}"]`);
+      rule.filters.materialCategories = val(`[data-role="filter-categories"][data-rule-id="${css(rule.id)}"]`);
 
       (rule.conditions || []).forEach(cond => {
         cond.leftField = val(`[data-role="cond-left-field"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
@@ -2504,6 +2221,8 @@
         cond.operator = val(`[data-role="cond-operator"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
         cond.rightType = val(`[data-role="cond-right-type"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
         cond.rightTransform = val(`[data-role="cond-right-transform"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
+        cond.compareMode = val(`[data-role="cond-compare-mode"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
+        cond.tolerance = val(`[data-role="cond-tolerance"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
 
         if (cond.rightType === 'field') {
           cond.rightField = val(`[data-role="cond-right-field"][data-rule-id="${css(rule.id)}"][data-cond-id="${css(cond.id)}"]`);
@@ -2515,9 +2234,7 @@
       });
     });
 
-    if (state.latestPayload) {
-      runLiveCheck('panel-save');
-    }
+    if (state.latestPayload) runLiveCheck();
   }
 
   function renderPanelContent() {
@@ -2529,27 +2246,17 @@
     if (!state.panelOpen) return;
 
     syncCurrentPageMeta();
-
     const fieldList = getSortedFields();
-
-    const headFields = Object.values(state.latestHeadFieldCatalog || {}).map(f => ({
-      value: f.key,
-      label: `[表头] ${f.label} (${f.key})`
-    }));
-
-    const bodyFields = buildFieldOptions(fieldList).map(f => ({
-      value: f.value,
-      label: `[表体] ${f.label}`
-    }));
-
+    const headFields = Object.values(state.latestHeadFieldCatalog || {}).map(f => ({ value: f.key, label: `[表头] ${f.label} (${f.key})` }));
+    const bodyFields = buildFieldOptions(fieldList).map(f => ({ value: f.value, label: `[表体] ${f.label}` }));
     const fieldOptions = [...headFields, ...bodyFields];
 
     panel.innerHTML = `
       <div class="hd">
-        <div class="title">双单位规则面板</div>
+        <div class="title">双单位规则面板（修复报错版）</div>
         <div class="sub">
-          这版只按你当前这个 HAR 重构。<br>
-          当前单据识别优先级：DOM pageId → 最近请求参数。
+          这版先修复运行报错，保证面板能起来。<br>
+          单据识别、字段抓取、动态输入、规则比较保留重构逻辑。
         </div>
         <div class="row" style="margin-top:8px;">
           <button id="__panel_save__">保存配置</button>
@@ -2566,7 +2273,8 @@
         <div class="tiny">
           当前单据中文名：<b>${escapeHtml(getLikelyPageCnName())}</b><br>
           当前识别来源：${escapeHtml(state.currentPageMeta.source || '-')}<br>
-          当前 formId：${escapeHtml(state.currentPageMeta.formId || '-')}
+          当前 formId：${escapeHtml(state.currentPageMeta.formId || '-')}<br>
+          当前 pageId：${escapeHtml(state.currentPageMeta.pageId || '-')}
         </div>
       </div>
 
@@ -2577,10 +2285,7 @@
 
       <div class="sec">
         <h4>二、表体字段总览</h4>
-        <div class="tiny">
-          ${state.panelDirty ? '<span style="color:#cf1322;">当前数据已更新，点“重新渲染”可刷新显示。</span>' : ''}
-        </div>
-
+        <div class="tiny">${state.panelDirty ? '<span style="color:#cf1322;">当前数据已更新，点“重新渲染”可刷新显示。</span>' : ''}</div>
         <div class="field-table">
           <table>
             <thead>
@@ -2592,18 +2297,14 @@
               </tr>
             </thead>
             <tbody>
-              ${
-                fieldList.length
-                  ? fieldList.map(f => `
-                    <tr>
-                      <td>${escapeHtml(f.label)}</td>
-                      <td>${escapeHtml(f.key)}</td>
-                      <td>${escapeHtml(f.sample || '')}</td>
-                      <td>${escapeHtml(f.source || '')}</td>
-                    </tr>
-                  `).join('')
-                  : `<tr><td colspan="4" style="color:#8c8c8c;">当前还没有抓到表体字段数据</td></tr>`
-              }
+              ${fieldList.length ? fieldList.map(f => `
+                <tr>
+                  <td>${escapeHtml(f.label)}</td>
+                  <td>${escapeHtml(f.key)}</td>
+                  <td>${escapeHtml(f.sample || '')}</td>
+                  <td>${escapeHtml(f.source || '')}</td>
+                </tr>
+              `).join('') : `<tr><td colspan="4" style="color:#8c8c8c;">当前还没有抓到表体字段数据</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -2622,6 +2323,7 @@
 
       <div class="sec">
         <h4>四、规则配置</h4>
+        <div class="tiny">可以按：单据类型 + 商品编码 + 商品类别 先过滤，再比较字段。</div>
         <div id="__rules_container__">${renderRulesHtml(fieldOptions)}</div>
         <div class="row" style="margin-top:8px;">
           <button id="__add_rule__">新增规则</button>
@@ -2630,10 +2332,7 @@
 
       <div class="sec">
         <h4>五、当前命中结果</h4>
-        <div class="tiny">
-          拦截：${state.blockItems.length} 条；提示：${state.warnItems.length} 条；<br>
-          当前行数据来源优先为实际表格 DOM，读不到时才回退 payload + inputReturn。
-        </div>
+        <div class="tiny">拦截：${state.blockItems.length} 条；提示：${state.warnItems.length} 条。</div>
         <div class="row" style="margin-top:8px;">
           <button id="__show_block__">查看拦截明细</button>
           <button class="gray" id="__show_warn__">查看提示明细</button>
@@ -2657,14 +2356,12 @@
       syncCurrentPageMeta();
       scanButtonsFromDom();
       scanPageScopesFromDom();
-
       if (state.latestPayload) {
         state.latestFieldCatalog = buildFieldCatalogFromPayload(state.latestPayload);
         state.latestHeadFieldCatalog = buildHeadFieldCatalogFromPayload(state.latestPayload);
         state.latestHeadValues = buildHeadValuesFromPayload(state.latestPayload);
         state.latestButtonHintKeys = buildButtonHintKeysFromPayload(state.latestPayload);
       }
-
       state.panelDirty = false;
       renderPanelContent();
     });
@@ -2676,14 +2373,13 @@
     bindClick('__panel_import__', () => {
       const text = prompt('请粘贴配置 JSON：');
       if (!text) return;
-
       try {
         state.config = mergeConfig(clone(DEFAULT_CONFIG), JSON.parse(text));
         saveConfig();
         scanButtonsFromDom();
         scanPageScopesFromDom();
         renderPanelContent();
-        runLiveCheck('import');
+        runLiveCheck();
         alert('导入成功');
       } catch (e) {
         alert('JSON 格式不正确');
@@ -2697,7 +2393,7 @@
       scanButtonsFromDom();
       scanPageScopesFromDom();
       renderPanelContent();
-      runLiveCheck('reset');
+      runLiveCheck();
     });
 
     bindClick('__panel_close__', () => {
@@ -2711,16 +2407,11 @@
       if (!key) return alert('请输入字段key');
 
       const exists = (state.config.customFields || []).find(x => x.key === key);
-      if (exists) {
-        exists.label = label || key;
-      } else {
-        state.config.customFields.push({ key, label: label || key });
-      }
+      if (exists) exists.label = label || key;
+      else state.config.customFields.push({ key, label: label || key });
 
       saveConfig();
-      if (state.latestPayload) {
-        state.latestFieldCatalog = buildFieldCatalogFromPayload(state.latestPayload);
-      }
+      if (state.latestPayload) state.latestFieldCatalog = buildFieldCatalogFromPayload(state.latestPayload);
       renderPanelContent();
     });
 
@@ -2785,16 +2476,12 @@
         const rid = sel.getAttribute('data-rule-id');
         const rule = state.config.rules.find(r => r.id === rid);
         if (!rule) return;
-
         const value = sel.value;
         if (!value) return;
-
         const parts = value.split('|||');
         if (parts.length !== 2) return;
-
         rule.scopeType = parts[0];
         rule.scopeValue = parts[1];
-
         renderPanelContent();
       };
     });
@@ -2874,28 +2561,21 @@
     const mo = new MutationObserver(() => {
       const fab = document.getElementById(FAB_ID);
       const panel = document.getElementById(PANEL_ID);
-      if (!fab || !panel) {
-        tryMount();
-      }
+      if (!fab || !panel) tryMount();
     });
 
-    mo.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
 
     setInterval(() => {
       const fab = document.getElementById(FAB_ID);
       const panel = document.getElementById(PANEL_ID);
-      if (!fab || !panel) {
-        tryMount();
-      }
-      syncCurrentPageMeta();
+      if (!fab || !panel) tryMount();
+      try { syncCurrentPageMeta(); } catch (e) {}
     }, 1500);
   }
 
   // =========================================================
-  // 十七、实时检查
+  // 十六、实时检查
   // =========================================================
   function isPanelBusy() {
     if (!state.panelOpen) return false;
@@ -2907,7 +2587,7 @@
     const trigger = debounce(() => {
       if (isPanelBusy()) return;
       syncCurrentPageMeta();
-      runLiveCheck('editing');
+      runLiveCheck();
     }, 300);
 
     document.addEventListener('input', e => {
@@ -2930,59 +2610,24 @@
       trigger();
     });
 
-    mo.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      characterData: true
-    });
+    mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
 
     setInterval(() => {
-      syncCurrentPageMeta();
-      scanButtonsFromDom();
-      scanPageScopesFromDom();
+      try {
+        syncCurrentPageMeta();
+        scanButtonsFromDom();
+        scanPageScopesFromDom();
+      } catch (e) {}
     }, 2000);
   }
 
   // =========================================================
-  // 十八、配置存储
-  // =========================================================
-  function mergeConfig(base, ext) {
-    const result = Array.isArray(base) ? [...base] : { ...base };
-    for (const k in ext) {
-      const bv = result[k];
-      const ev = ext[k];
-      if (Array.isArray(ev)) {
-        result[k] = ev;
-      } else if (ev && typeof ev === 'object' && bv && typeof bv === 'object' && !Array.isArray(bv)) {
-        result[k] = mergeConfig(bv, ev);
-      } else {
-        result[k] = ev;
-      }
-    }
-    return result;
-  }
-
-  function loadConfig() {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (!saved) return clone(DEFAULT_CONFIG);
-      return mergeConfig(clone(DEFAULT_CONFIG), JSON.parse(saved));
-    } catch (e) {
-      return clone(DEFAULT_CONFIG);
-    }
-  }
-
-  // =========================================================
-  // 十九、调试接口
+  // 十七、调试接口
   // =========================================================
   function exposeHelpers() {
     window.__JDY_RULE_PANEL__ = {
-      getState() {
-        return state;
-      },
-      getConfig() {
-        return state.config;
-      },
+      getState() { return state; },
+      getConfig() { return state.config; },
       openPanel() {
         state.panelOpen = true;
         ensurePanel();
@@ -2993,7 +2638,7 @@
         renderPanelContent();
       },
       recheck() {
-        runLiveCheck('manual-recheck');
+        runLiveCheck();
       },
       syncPage() {
         syncCurrentPageMeta();
@@ -3001,12 +2646,9 @@
         return state.currentPageMeta;
       },
       checkResponse(payload) {
-        if (isFullPayload(payload)) {
-          applyPayload(payload, 'manual', true);
-        } else {
-          mergeInputReturnDeltas(payload);
-        }
-        runLiveCheck('manual-checkResponse');
+        if (isFullPayload(payload)) applyPayload(payload, true);
+        else mergeInputReturnDeltas(payload);
+        runLiveCheck();
         return {
           currentPageMeta: state.currentPageMeta,
           bodyFields: state.latestFieldCatalog,
@@ -3021,7 +2663,7 @@
   }
 
   // =========================================================
-  // 二十、启动
+  // 启动
   // =========================================================
   function init() {
     patchFetch();
@@ -3030,7 +2672,6 @@
     installLiveCheck();
     exposeHelpers();
     installPanelAutoMount();
-    log('规则面板终版（仅按当前HAR重构）已启动');
   }
 
   init();
