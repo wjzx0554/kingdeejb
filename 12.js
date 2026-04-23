@@ -147,7 +147,7 @@
       stk_bill_in: '采购入库单',
       stk_bill_out: '其他出库单',
       batch_fill_entry_stock: '批量填充仓库',
-      inv_pick_bill: '拣货单'
+      inv_pick_bill: '生产领料单'
     };
     return map[formId] || '';
   }
