@@ -8,6 +8,7 @@
 ## 当前文件
 
 - `jdy-check-template.user.js`：通用字段一致性校验模板（拦保存/提交/审核等关键动作）。
+- `12.js`：当前联调版字段一致性脚本（与 `jdy-check-template.user.js` 同步）。
 - `jdy-auto-workflow-template.user.js`：通用自动流程模板（切页签、修正表格、删空行、保存确认）。
 - `jdy-auto-edit-11111.original.user.js`：自动修改表格脚本（original 存档）。
 - `jdy-order-stock-injector.original.user.js`：订单汇总注入即时库存脚本（original 存档）。
